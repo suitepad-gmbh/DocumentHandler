@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Iterator;
 
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
@@ -35,10 +36,11 @@ public class DocumentHandler extends CordovaPlugin {
 			// parse arguments
 			final JSONObject arg_object = args.getJSONObject(0);
 			final String url = arg_object.getString("url");
+            final JSONObject prefer = arg_object.getJSONObject("prefer");
 			System.out.println("Found: " + url);
 
 			// start async download task
-			new FileDownloaderAsyncTask(callbackContext, url).execute();
+			new FileDownloaderAsyncTask(callbackContext, url, prefer).execute();
 			
 			return true;
 		}
@@ -107,7 +109,6 @@ public class DocumentHandler extends CordovaPlugin {
 	 */
 	private static String getMimeType(String url) {
 		String mimeType = null;
-
 		String extension = MimeTypeMap.getFileExtensionFromUrl(url);
 		if (extension != null) {
 			MimeTypeMap mime = MimeTypeMap.getSingleton();
@@ -123,12 +124,14 @@ public class DocumentHandler extends CordovaPlugin {
 
 		private final CallbackContext callbackContext;
 		private final String url;
+        private JSONObject prefer;
 
 		public FileDownloaderAsyncTask(CallbackContext callbackContext,
-				String url) {
+				String url, JSONObject prefer) {
 			super();
 			this.callbackContext = callbackContext;
 			this.url = url;
+            this.prefer = prefer;
 		}
 
 		@Override
@@ -143,6 +146,9 @@ public class DocumentHandler extends CordovaPlugin {
 		protected void onPostExecute(File result) {
 
 			Context context = cordova.getActivity().getApplicationContext();
+            String preferredAct = null;
+            String preferredPkg = null;
+            String [] preferredTarget;
 
 			// get mime type of file data
 			String mimeType = getMimeType(url);
@@ -151,9 +157,35 @@ public class DocumentHandler extends CordovaPlugin {
 				return;
 			}
 
+            if(this.prefer != null) {
+                Iterator<String> iterator = this.prefer.keys();
+                while (iterator.hasNext()) {
+                    String next =  iterator.next();
+                    if(url.endsWith("." + next)) {
+                        try {
+                            preferredTarget = this.prefer.getString(next).split("/");
+                            preferredPkg = preferredTarget[0];
+                            preferredAct = preferredTarget[1];
+                            break;
+
+                        } catch (JSONException e) {
+                            e.printStackTrace();
+                        } catch (IndexOutOfBoundsException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                    
+                }
+            }
+
 			// start an intent with the file
 			try {
 				Intent intent = new Intent(Intent.ACTION_VIEW);
+
+                if(preferredAct != null) {
+                    intent.setClassName(preferredPkg, preferredAct);
+                }
+
 				intent.setDataAndType(Uri.fromFile(result), mimeType);
 				intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 				context.startActivity(intent);
