@@ -5,8 +5,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.util.Iterator;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
@@ -14,19 +17,24 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import android.app.ProgressDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.webkit.CookieManager;
 import android.webkit.MimeTypeMap;
+import android.widget.Toast;
 
 public class DocumentHandler extends CordovaPlugin {
 
 	public static final String HANDLE_DOCUMENT_ACTION = "HandleDocumentWithURL";
 	public static final int ERROR_NO_HANDLER_FOR_DATA_TYPE = 53;
 	public static final int ERROR_UNKNOWN_ERROR = 1;
+    private Executor asyncTasksExecutor = Executors.newFixedThreadPool(5);
 
 	@Override
 	public boolean execute(String action, JSONArray args,
@@ -40,8 +48,13 @@ public class DocumentHandler extends CordovaPlugin {
 			System.out.println("Found: " + url);
 
 			// start async download task
-			new FileDownloaderAsyncTask(callbackContext, url, prefer).execute();
-			
+            cordova.getActivity().runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    new FileDownloaderAsyncTask(callbackContext, url, prefer).executeOnExecutor(asyncTasksExecutor);
+                }
+            });
+
 			return true;
 		}
 		return false;
@@ -49,56 +62,6 @@ public class DocumentHandler extends CordovaPlugin {
 
 	// used for all downloaded files, so we can find and delete them again.
 	private final static String FILE_PREFIX = "DH_";
-
-	/**
-	 * downloads a file from the given url to external storage.
-	 * 
-	 * @param url
-	 * @return
-	 */
-	private File downloadFile(String url) {
-
-		try {
-			// get an instance of a cookie manager since it has access to our
-			// auth cookie
-			CookieManager cookieManager = CookieManager.getInstance();
-
-			// get the cookie string for the site.
-			String auth = null;
-			if (cookieManager.getCookie(url) != null) {
-				auth = cookieManager.getCookie(url).toString();
-			}
-
-			URL url2 = new URL(url);
-			HttpURLConnection conn = (HttpURLConnection) url2.openConnection();
-			if (auth != null) {
-				conn.setRequestProperty("Cookie", auth);
-			}
-
-			InputStream reader = conn.getInputStream();
-
-			String extension = MimeTypeMap.getFileExtensionFromUrl(url);
-			File f = File.createTempFile(FILE_PREFIX, "." + extension,
-					null);
-			// make sure the receiving app can read this file
-			f.setReadable(true, false);
-			FileOutputStream outStream = new FileOutputStream(f);
-
-			byte[] buffer = new byte[1024];
-			int readBytes = reader.read(buffer);
-			while (readBytes > 0) {
-				outStream.write(buffer, 0, readBytes);
-				readBytes = reader.read(buffer);
-			}
-			reader.close();
-			outStream.close();
-			return f;
-
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
-		return null;
-	}
 
 	/**
 	 * Returns the MIME Type of the file by looking at file name extension in
@@ -120,11 +83,13 @@ public class DocumentHandler extends CordovaPlugin {
 		return mimeType;
 	}
 
-	private class FileDownloaderAsyncTask extends AsyncTask<Void, Void, File> {
+	private class FileDownloaderAsyncTask extends AsyncTask<Void, Double, File> {
 
 		private final CallbackContext callbackContext;
 		private final String url;
         private JSONObject prefer;
+        private ProgressDialog pd;
+        String error = null;
 
 		public FileDownloaderAsyncTask(CallbackContext callbackContext,
 				String url, JSONObject prefer) {
@@ -132,18 +97,150 @@ public class DocumentHandler extends CordovaPlugin {
 			this.callbackContext = callbackContext;
 			this.url = url;
             this.prefer = prefer;
+
 		}
 
 		@Override
 		protected File doInBackground(Void... arg0) {
+            try {
+                System.out.println("DOCUMENTHANDLER A");
+                publishProgress(0.0);
+                System.out.println("DOCUMENTHANDLER B");
+                int totalRead = 0;
+                int totalSize;
+                double progress;
+                // get an instance of a cookie manager since it has access to our
+                // auth cookie
+                CookieManager cookieManager = CookieManager.getInstance();
 
-			File f = downloadFile(url);
+                System.out.println("DOCUMENTHANDLER C");
+                // get the cookie string for the site.
+                String auth = null;
+                if (cookieManager.getCookie(url) != null) {
+                    auth = cookieManager.getCookie(url).toString();
+                }
 
-			return f;
+                System.out.println("DOCUMENTHANDLER D");
+                URL url2 = new URL(url);
+                System.setProperty("http.keepAlive", "false");
+                System.out.println("DOCUMENTHANDLER E");
+                HttpURLConnection conn = (HttpURLConnection) url2.openConnection();
+
+                System.out.println("DOCUMENTHANDLER F");
+                conn.setRequestProperty("connection", "close");
+                conn.setConnectTimeout(30 * 1000);
+                conn.setReadTimeout(30 * 1000);
+                if (auth != null) {
+                    conn.setRequestProperty("Cookie", auth);
+                }
+
+                totalSize = conn.getContentLength();
+
+                System.out.println("DOCUMENTHANDLER G");
+                InputStream reader = conn.getInputStream();
+
+                System.out.println("DOCUMENTHANDLER H");
+                String extension = MimeTypeMap.getFileExtensionFromUrl(url);
+                System.out.println("DOCUMENTHANDLER I");
+                File f = File.createTempFile(FILE_PREFIX, "." + extension,
+                        null);
+                // make sure the receiving app can read this file
+                f.setReadable(true, false);
+                FileOutputStream outStream = new FileOutputStream(f);
+
+                System.out.println("DOCUMENTHANDLER J");
+                byte[] buffer = new byte[1024];
+                int readBytes = reader.read(buffer);
+                System.out.println("DOCUMENTHANDLER K");
+                while (readBytes > 0) {
+                    if(isCancelled()) {
+                        System.out.println("DOCUMENTHANDLER L");
+                        reader.close();
+                        conn.disconnect();
+                        return null;
+                    }
+                    totalRead += 1024;
+                    if(totalSize > 0) {
+                        progress = (float)totalRead / (float)totalSize;
+                        publishProgress(progress);
+                    }
+                    outStream.write(buffer, 0, readBytes);
+                    readBytes = reader.read(buffer);
+                }
+                System.out.println("DOCUMENTHANDLER N");
+                reader.close();
+                System.out.println("DOCUMENTHANDLER O");
+                outStream.close();
+                System.out.println("DOCUMENTHANDLER P");
+                return f;
+
+            } catch(SocketTimeoutException e) {
+                System.out.println("DOCUMENTHANDLER Q");
+                e.printStackTrace();
+                error = e.getMessage();
+                cancel(true);
+            }
+            catch (IOException e) {
+                System.out.println("DOCUMENTHANDLER R");
+                e.printStackTrace();
+                error = e.getMessage();
+                cancel(true);
+
+            }
+            System.out.println("DOCUMENTHANDLER S");
+            return null;
 		}
+        @Override
+        protected void onProgressUpdate(Double... values) {
+            super.onProgressUpdate(values);
+            if(pd.isIndeterminate()) {
+                pd.hide();
+                pd = new ProgressDialog(cordova.getActivity());
+                pd.setIndeterminate(false);
+                pd.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+                pd.show();
+                pd.setOnCancelListener(new DialogInterface.OnCancelListener() {
+                    @Override
+                    public void onCancel(DialogInterface dialogInterface) {
+                        cancel(true);
+                    }
+                });
+            }
+            pd.setProgress((int)(values[0] * 100));
+        }
 
-		@Override
+        @Override
+        protected void onPreExecute() {
+            System.out.println("DOCUMENTHANDLER PREXEC");
+            super.onPreExecute();
+            pd = new ProgressDialog(cordova.getActivity());
+            pd.setTitle("Processing...");
+            pd.setMessage("Please wait.");
+            pd.setIndeterminate(true);
+
+            pd.setOnCancelListener(new DialogInterface.OnCancelListener() {
+                @Override
+                public void onCancel(DialogInterface dialogInterface) {
+                    cancel(true);
+                }
+            });
+            pd.show();
+        }
+
+        @Override
+        protected void onCancelled() {
+            System.out.println("DOCUMENTHANDLER CANCELLED");
+            super.onCancelled();
+            pd.hide();
+            if(error != null) {
+                Toast.makeText(DocumentHandler.this.cordova.getActivity(), error, Toast.LENGTH_LONG).show();
+            }
+        }
+
+        @Override
 		protected void onPostExecute(File result) {
+            System.out.println("DOCUMENTHANDLER POSTEXEC");
+            pd.hide();
 
 			Context context = cordova.getActivity().getApplicationContext();
             String preferredAct = null;
@@ -152,20 +249,20 @@ public class DocumentHandler extends CordovaPlugin {
 
 			// get mime type of file data
 			String mimeType = getMimeType(url);
-			if (mimeType == null) {
-				callbackContext.error(ERROR_UNKNOWN_ERROR);
-				return;
-			}
+
 
             if(this.prefer != null) {
                 Iterator<String> iterator = this.prefer.keys();
                 while (iterator.hasNext()) {
                     String next =  iterator.next();
-                    if(url.endsWith("." + next)) {
+                    if(MimeTypeMap.getFileExtensionFromUrl(url).equals(next)) {
                         try {
                             preferredTarget = this.prefer.getString(next).split("/");
                             preferredPkg = preferredTarget[0];
                             preferredAct = preferredTarget[1];
+                            if(mimeType == null) {
+                                mimeType = "application/pdf";
+                            }
                             break;
 
                         } catch (JSONException e) {
@@ -177,18 +274,33 @@ public class DocumentHandler extends CordovaPlugin {
                     
                 }
             }
+            if (mimeType == null) {
+                callbackContext.error(ERROR_UNKNOWN_ERROR);
+                return;
+            }
 
 			// start an intent with the file
 			try {
 				Intent intent = new Intent(Intent.ACTION_VIEW);
 
+                if(preferredPkg != null
+                        && preferredPkg.equals("com.adobe.reader")
+                        && Build.MODEL.equals("SM-T550")
+                        && Build.MANUFACTURER.equals("samsung")
+                ) {
+                    preferredPkg = "com.google.android.apps.docs";
+                    preferredAct = "com.google.android.apps.viewer.PdfViewerActivity";
+                }
                 if(preferredAct != null) {
                     intent.setClassName(preferredPkg, preferredAct);
                 }
 
+
+
 				intent.setDataAndType(Uri.fromFile(result), mimeType);
-				intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-				context.startActivity(intent);
+//				intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+//				context.startActivity(intent);
+                cordova.getActivity().startActivity(intent);
 
 				callbackContext.success(); // Thread-safe.
 			} catch (ActivityNotFoundException e) {
