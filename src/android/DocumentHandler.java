@@ -285,8 +285,7 @@ public class DocumentHandler extends CordovaPlugin {
 
                 if(preferredPkg != null
                         && preferredPkg.equals("com.adobe.reader")
-                        && Build.MODEL.equals("SM-T550")
-                        && Build.MANUFACTURER.equals("samsung")
+                        && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
                 ) {
                     preferredPkg = "com.google.android.apps.docs";
                     preferredAct = "com.google.android.apps.viewer.PdfViewerActivity";
